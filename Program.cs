@@ -1,18 +1,21 @@
-﻿using System.Diagnostics.CodeAnalysis;
+﻿using Azure.Storage.Blobs.Specialized;
+using System.Diagnostics.CodeAnalysis;
 using System.Security.Cryptography;
 
 namespace Archive;
 
 class Program
 {
+    private const string configFilename = "archive.conf";
     private const int iterations = 1000;
     private const int keyLength = 32;
     private const int ivLength = 16;
 
     public enum Action
     {
-        Encrypt,
-        Decrypt,
+        Setup,
+        Upload,
+        Download,
     }
 
     /// <summary>
@@ -22,7 +25,7 @@ class Program
     /// <param name="input">File to archive</param>
     /// <param name="output">Location to store the archived file</param>
     /// <param name="password">Password used to generate encryption key</param>
-    public static int Main(Action? action, FileInfo? input, FileInfo? output, string? password)
+    public static int Main(Action? action, string? input, string? output, string? password)
     {
         if (!Validate(action, input, output, password))
         {
@@ -31,12 +34,16 @@ class Program
 
         switch (action)
         {
-            case Action.Encrypt:
-                EncryptFile(input, output, password);
+            case Action.Setup:
+                SetupConnectionString();
                 break;
 
-            case Action.Decrypt:
-                DecryptFile(input, output, password);
+            case Action.Upload:
+                UploadFile(input, output, password);
+                break;
+
+            case Action.Download:
+                DownloadFile(input, output, password);
                 break;
         }
 
@@ -45,8 +52,8 @@ class Program
 
     private static bool Validate(
         [NotNullWhen(true)] Action? action,
-        [NotNullWhen(true)] FileInfo? input,
-        [NotNullWhen(true)] FileInfo? output,
+        [NotNullWhen(true)] string? input,
+        [NotNullWhen(true)] string? output,
         [NotNullWhen(true)] string? password)
     {
         var valid = true;
@@ -57,13 +64,18 @@ class Program
             valid = false;
         }
 
+        if (action == Action.Setup)
+        {
+            return true;
+        }
+
         if (input is null)
         {
             Console.Error.WriteLine("input file is required.");
             valid = false;
         }
 
-        if (input is not null && !input.Exists)
+        if (input is not null && action == Action.Upload && !File.Exists(input))
         {
             Console.Error.WriteLine("input file does not exists.");
             valid = false;
@@ -84,13 +96,46 @@ class Program
         return valid;
     }
 
-    private static void EncryptFile(FileInfo input, FileInfo output, string password)
+    private static bool Validate(string connectionString, string containerName)
     {
+        if (string.IsNullOrEmpty(connectionString) || string.IsNullOrEmpty(containerName))
+        {
+            Console.Error.WriteLine("Setup required.");
+            return false;
+        }
+
+        return true;
+    }
+
+    private static void SetupConnectionString()
+    {
+        Console.WriteLine("Enter the connection string for Azure Blob Storage:");
+        var connectionString = Console.ReadLine() ?? string.Empty;
+
+        Console.WriteLine("Enter the container name for Azure Blob Storage:");
+        var containerName = Console.ReadLine() ?? string.Empty;
+
+        WriteConfig(connectionString, containerName);
+
+        Console.WriteLine("Setup completed.");
+    }
+
+    private static void UploadFile(string input, string output, string password)
+    {
+        var (connectionString, containerName) = LoadConfig();
+
+        if (!Validate(connectionString, containerName))
+        {
+            return;
+        }
+
         var salt = GenerateSalt();
         var key = GenerateKey(salt, password);
 
-        using var inputStream = input.OpenRead();
-        using var outputStream = output.OpenWrite();
+        var blockClient = new BlockBlobClient(connectionString, containerName, output);
+
+        using var inputStream = new FileStream(input, FileMode.Open, FileAccess.Read);
+        using var outputStream = blockClient.OpenWrite(overwrite: true);
 
         using var aes = Aes.Create();
         aes.Key = key;
@@ -105,10 +150,19 @@ class Program
         cryptoStream.Flush();
     }
 
-    private static void DecryptFile(FileInfo input, FileInfo output, string password)
+    private static void DownloadFile(string input, string output, string password)
     {
-        using var inputStream = input.OpenRead();
-        using var outputStream = output.OpenWrite();
+        var (connectionString, containerName) = LoadConfig();
+
+        if (!Validate(connectionString, containerName))
+        {
+            return;
+        }
+
+        var blockClient = new BlockBlobClient(connectionString, containerName, input);
+
+        using var inputStream = blockClient.OpenRead();
+        using var outputStream = new FileStream(output, FileMode.OpenOrCreate, FileAccess.Write);
 
         var salt = new byte[keyLength];
         var iv = new byte[ivLength];
@@ -125,6 +179,28 @@ class Program
         cryptoStream.CopyTo(outputStream);
 
         outputStream.Flush();
+    }
+
+    private static FileInfo GetConfigFile() => new (Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), configFilename));
+
+    private static (string connectionString, string containerName) LoadConfig()
+    {
+        using var configFile = GetConfigFile().OpenText();
+
+        var connectionString = configFile.ReadLine() ?? string.Empty;
+        var containerName = configFile.ReadLine() ?? string.Empty;
+
+        return (connectionString, containerName);
+    }
+
+    private static void WriteConfig(string connectionString, string containerName)
+    {
+        using var configFile = GetConfigFile().CreateText();
+
+        configFile.WriteLine(connectionString);
+        configFile.WriteLine(containerName);
+
+        configFile.Flush();
     }
 
     private static byte[] GenerateSalt() => RandomNumberGenerator.GetBytes(keyLength);
