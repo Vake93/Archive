@@ -7,8 +7,8 @@ Usage:
 
 Options:
 ```
-  --action <Decrypt|Encrypt>  action
-  --input <input>             input
-  --output <output>           output
-  --password <password>       password
+  --action <Setup|Download|Upload>  action
+  --input <input>                   input
+  --output <output>                 output
+  --password <password>             password
 ```
